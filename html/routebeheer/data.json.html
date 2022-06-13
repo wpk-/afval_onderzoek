@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<style>
+html, body, textarea {
+    border: none;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    width: 100%;
+}
+</style>
+<script src="papaparse.min.js"></script>
+<script type="module">
+const api = 'https://api.data.amsterdam.nl/v1/'
+const options = {
+    download: true,
+    downloadRequestHeaders: {'Accept-Crs': 'EPSG:4326'},
+    header: true,
+    skipEmptyLines: true,
+}
+
+function round(x, n=0) {
+    const pow = Math.pow(10, n)
+    return Math.round((parseFloat(x) + Number.EPSILON) * pow) / pow
+}
+
+function chunk(arr, n) {
+    // https://stackoverflow.com/a/10456644
+    return Array.from(Array(Math.ceil(arr.length / n)),
+                      (_, i) => arr.slice(i * n, i * n + n))
+}
+
+function fetchall(sources, complete) {
+    const json = {}
+    let n = Object.keys(sources).length
+    Object.entries(sources).forEach(([key, url]) => {
+        Papa.parse(url, {...options, complete: ({data, errors}) => {
+            if (errors.length) {console.error(errors)}
+            json[key] = data
+            if (--n === 0)
+                complete(json)
+        }})
+    })
+}
+
+function process(json) {
+    const volume = Object.fromEntries(json['Containertypes'].map(
+        ({Id, Volumem3}) => [Id, round(Volumem3, 2)]))
+
+    const straatnaam = Object.fromEntries(json['Straatnamen'].map(
+        ({Id, Naam}) => [`${Id}.`.split('.')[0], Naam]))
+
+    const adres = Object.fromEntries(json['Huisnummers'].map(
+        ({Id, Huisnummer, Huisletter, Huisnummertoevoeging, Ligtaanopenbareruimteid}) =>
+        [`${Id}.`.split('.')[0], `${straatnaam[Ligtaanopenbareruimteid]} ${Huisnummer} ${Huisletter}${Huisletter&&Huisnummertoevoeging?'-':''}${Huisnummertoevoeging}`.trim()]))
+
+    const byName = (a, b) => a[1] < b[1] ? -1 : 1
+
+    delete json['Containertypes']
+    delete json['Straatnamen']
+    delete json['Huisnummers']
+
+    json['Stadsdelen'] = {
+        fields: ['id', 'naam', 'geo'],
+        data: json['Stadsdelen']
+            .map(({Naam, Code, Geometrie, Id}) => ([
+                `${Id}.`.split('.')[0],
+                `${Code}: ${Naam}`,
+                chunk(Geometrie.slice(Geometrie.indexOf('('))
+                      .match(/[\d.]+/g).map(x => round(x, 8)), 2),
+            ])),
+    }
+    json['Stadsdelen']['data'].sort(byName)
+
+    json['Gebieden'] = {
+        fields: ['id', 'naam', 'geo', 'stadsdeel'],
+        data: json['Gebieden']
+            .map(({Naam, Code, Geometrie, Id, Ligtinstadsdeelid}) => ([
+                `${Id}.`.split('.')[0],
+                `${Code}: ${Naam}`,
+                chunk(Geometrie.slice(Geometrie.indexOf('('))
+                      .match(/[\d.]+/g).map(x => round(x, 8)), 2),
+                Ligtinstadsdeelid,
+            ])),
+    }
+    json['Gebieden']['data'].sort(byName)
+
+    json['Buurten'] = {
+        fields: ['id', 'naam', 'geo', 'gebied'],
+        data: json['Buurten']
+            .map(({Naam, Code, Geometrie, Id, Ligtinggwgebiedid}) => ([
+                `${Id}.`.split('.')[0],
+                `${Code}: ${Naam}`,
+                chunk(Geometrie.slice(Geometrie.indexOf('('))
+                      .match(/[\d.]+/g).map(x => round(x, 8)), 2),
+                Ligtinggwgebiedid,
+            ])),
+    }
+    json['Buurten']['data'].sort(byName)
+
+    json['Containers'] = {
+        fields: ['id', 'cluster', 'adres', 'buurt', 'fractie', 'volume', 'geo'],
+        data: json['Containers']
+            .filter(({Verwijderddp}) => Verwijderddp === 'False')
+            .map(({
+                Idnummer,
+                Clusterid,
+                Fractieomschrijving,
+                Geometrie,
+                Typeid,
+                Bagnummeraanduidingid,
+                Gbdbuurtid,
+            }) => ([
+                Idnummer,
+                Clusterid,
+                adres[Bagnummeraanduidingid] || 'Adres onbekend',
+                Gbdbuurtid,
+                Fractieomschrijving,
+                volume[Typeid],
+                /\(([\d.]+) ([\d.]+)/.exec(Geometrie).slice(1).map(x => round(x, 8)),
+            ])),
+    }
+    json['Containers']['data'].sort((a, b) => a[2] < b[2] ? -1 : 1)
+
+    json['Dagen'] = {
+        fields: ['id', 'naam'],
+        data: [
+            ['maandag', 'maandag'],
+            ['dinsdag', 'dinsdag'],
+            ['woensdag', 'woensdag'],
+            ['donderdag', 'donderdag'],
+            ['vrijdag', 'vrijdag'],
+            ['zaterdag', 'zaterdag'],
+            ['zondag', 'zondag'],
+        ],
+    }
+}
+
+function progress(text) {
+    const status = document.querySelector('#status')
+    const li = document.createElement('li')
+    li.textContent = text
+    status.appendChild(li)
+}
+
+function progressComplete(text, json) {
+    const status = document.querySelector('#status')
+    const li = document.createElement('li')
+    const a = document.createElement('a')
+    const file = new Blob([JSON.stringify(json)], {type: 'text/plain'})
+    a.href = URL.createObjectURL(file)
+    a.download = 'data.json'
+    a.textContent = text
+    li.appendChild(a)
+    status.appendChild(li)
+}
+
+addEventListener('load', async () => {
+    progress('Fetching data...')
+    fetchall({
+        Stadsdelen: `${api}gebieden/stadsdelen/?_format=csv&_fields=code,naam,id,geometrie`,
+        Gebieden: `${api}gebieden/ggwgebieden/?_format=csv&_fields=code,naam,id,geometrie,ligtInStadsdeelId`,
+        Buurten: `${api}gebieden/buurten/?_format=csv&_fields=code,naam,id,geometrie,ligtInGgwgebiedId`,
+        Containers: `${api}huishoudelijkafval/container/?_format=csv&_fields=idNummer,clusterId,fractieOmschrijving,geometrie,typeId,bagNummeraanduidingId,gbdBuurtId,verwijderdDp&status=1`,
+        Containertypes: `${api}huishoudelijkafval/containertype/?_format=csv&_fields=id,volumeM3`,
+        Huisnummers: `${api}bag/nummeraanduidingen/?_format=csv&_fields=id,huisnummer,huisletter,huisnummertoevoeging,ligtAanOpenbareruimteId`,
+        Straatnamen: `${api}bag/openbareruimtes/?_format=csv&_fields=id,naam`,
+    }, json => {
+        progress('Processing data...')
+        process(json)
+
+        console.log(Object.keys(json))
+        console.log(`${json['Containers'].data.length} containers.`)
+        console.log(json['Containers'].data.slice(0, 10))
+
+        progress('Done.')
+        progressComplete('[ download ]', json)
+    })
+})
+</script>
+<ol id="status"></ol>

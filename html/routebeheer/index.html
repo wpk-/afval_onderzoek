@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="nl">
+<meta charset="utf-8">
+<title>Routebeheer</title>
+<style type="text/css">
+html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+}
+#main {
+    display: grid;
+    grid-template-areas:
+        "top top top top top"
+        "one two three four five"
+        "map map map map six"
+        "map map map map seven";
+    grid-template-columns: 20% 20% 20% 20% 20%;
+    grid-template-rows: auto auto auto 1fr;
+    height: 100%;
+}
+
+#fractie {
+    grid-area: top;
+}
+#kaart {
+    grid-area: map;
+}
+#actie {
+    grid-area: six;
+}
+#adres {
+    grid-area: seven;
+}
+
+nav {
+    display: flex;
+    flex-flow: row wrap;
+}
+nav select,
+nav cascaded-select {
+    flex: 1 100%;
+}
+
+option[disabled] {
+    display: none;
+}
+
+#map {
+    background-color: lightsteelblue;
+    height: 100%;
+    position: relative;
+    width: 100%;
+}
+</style>
+<script src="deck.gl-8.4.min.js"></script>
+<script type="module">
+
+
+/*
+class Map {
+    constructor() {
+        this.layers = []
+    }
+}
+*/
+import {bbox} from './js/geometry.js'
+import {BaseControl, SelectionControl, RadioSelect, MultiSelectMenu
+} from './js/controls.js'
+import {RouteSelectie, routeData} from './js/routes.js'
+
+import {load, fracties as fractiesArray} from './js/data.js'
+import {amsterdamLayer, containersLayer} from './js/kaart.js'
+import {GebiedenSelectie} from './js/gebieden.js'
+
+const cdata = load('containers')
+const bdata = load('buurten')
+const gdata = load('ggwgebieden')
+const sdata = load('stadsdelen')
+const rdata = load('routes', fractiesArray)
+
+
+/*
+const dag = new MultiSelectMenu('#dag select', {
+    data: data.Dagen.data,
+    getLabel: d => d,
+    onChange: (evt) => {
+        console.log('dag changed.')
+    },
+})
+const adres = new MultiSelectMenu('#adres select', {
+    data: [],
+    getLabel: d => d.Chauffeursomschrijving,
+    onChange: (evt) => {
+        console.log('adres changed.')
+    },
+})
+const route = new MultiSelectMenu('#route select', {
+    data: [],
+    getLabel,
+    onChange: (evt) => {
+        console.log('route changed.')
+    },
+})
+*/
+
+async function prepareUI() {
+    const amsterdam = amsterdamLayer()
+    const containers = containersLayer(cdata)
+
+    const props = {
+        getId: d => d.id,
+        getLabel: d => d.naam,
+        getParent: d => d.parent,
+    }
+    const gebiedenPromise = Promise.all([
+        sdata.then(data => new MultiSelectMenu('#stadsdeel select', {...props, data})),
+        gdata.then(data => new MultiSelectMenu('#gebied select', {...props, data})),
+        bdata.then(data => new MultiSelectMenu('#buurt select', {...props, data})),
+    ]).then(targets => new GebiedenSelectie(targets, {onChange: setLayers}))
+
+    const fracties = new RadioSelect('#fractie', {
+        name: 'fractie',
+        data: fractiesArray,
+        getLabel: d => d,
+    })
+
+    const routesPromise = rdata.then(data =>
+        new RouteSelectie([
+            fracties,
+            new MultiSelectMenu('#dag select', {}),
+            new MultiSelectMenu('#route select', {}),
+            new MultiSelectMenu('#adres select', {}),
+        ], {data, onChange: event => console.log(event)})
+    )
+
+    const layers = [amsterdam, containers, null, null]
+
+    const dck = new deck.Deck({
+        parent: document.querySelector('#map'),
+        initialViewState: {
+            longitude: 4.892241,
+            latitude: 52.373028,
+            zoom: 12,
+        },
+        controller: true,
+        layers,
+        onLoad: async () => {
+            const bounds = bbox((await cdata).map(d => d.geo))
+            const viewport = new deck.WebMercatorViewport(dck)
+            dck.setProps({
+                initialViewState: viewport.fitBounds(bounds),
+            })
+        },
+    })
+
+    function setLayers() {
+        //const coords = gebieden.selected.map(d => d.geo)
+        //const bounds = bbox([].concat(...coords))
+
+        dck.setProps({
+            layers,
+        //    initialViewState: new deck.WebMercatorViewport(dck)
+        //    .fitBounds(bounds, {padding: Math.floor(dck.height / 10)}),
+        })
+    }
+
+    gebiedenPromise.then(gebieden => {
+        layers[2] = gebieden.layer
+        setLayers()
+    })
+
+    routesPromise.then(routes => {
+        layers[3] = routes.layer
+        setLayers()
+    })
+
+    const main = document.querySelector('#main')
+
+/*
+    const fracties = ['glas', 'papier', 'rest', 'rest zuidoost',
+                      'rest noord ois', 'textiel']
+    const weekdagen = ['Maandag', 'Dinsdag', 'Woensdag', 'Donderdag',
+                       'Vrijdag', 'Zaterdag', 'Zondag']
+
+    const t0 = new Date()
+    const fractieData = await Fractiebestand.load(
+        '2022-05-12 Fractiebestanden AG-backup.xlsx',
+        {sheets: fracties},
+    )
+    console.log((new Date() - t0) / 1000)
+
+    const fractie = new RadioSelect(document.querySelector('#fractie'), {
+        name: 'fractie',
+        data: Object.keys(fractieData),
+        getLabel: d => d,
+        onChange: evt => {
+            const data = fractieData[fractie.selected]
+
+            data.sort((a, b) => (a.Chauffeursomschrijving||'').toLowerCase() >
+                                (b.Chauffeursomschrijving||'').toLowerCase()
+                                ? 1 : -1)
+
+            adres.props.data = data
+            adres.render()
+
+            const dagnamen = ['Maandag', 'Dinsdag', 'Woensdag', 'Donderdag',
+                              'Vrijdag', 'Zaterdag', 'Zondag']
+            const weekdagen = new Set()
+            for (var i=0; i<28; i+=7) {
+                for (var j=0; j<7; j++) {
+                    weekdagen.add(`${dagnamen[j]}.${i+j+1}`)
+                }
+            }
+
+            const dagen = new Set()
+            const routes = {}
+
+            data.forEach(d => {
+                for (const wd of weekdagen) {
+                    if (d.hasOwnProperty(wd)) {
+                        dagen.add(wd)
+                        if (routes.hasOwnProperty(d[wd])) {
+                            routes[d[wd]].push(wd)
+                        } else {
+                            routes[d[wd]] = [wd]
+                        }
+                    }
+                }
+            })
+
+            dag.props.data = Array.from(dagen).sort((a, b) =>
+                parseInt(a.split('.')[1]) - parseInt(b.split('.')[1]))
+            dag.render()
+
+            route.props.data = Object.entries(routes).map(([naam, dagen]) =>
+                ({naam, dagen})).sort((a, b) => a.naam.toLowerCase() > b.naam.toLowerCase() ? 1 : -1)
+            console.log(route.props.data)
+            route.render()
+        },
+    })
+*/
+}
+
+//addEventListener('DOMContentLoaded', async () => {
+addEventListener('load', async () => {
+    // Render.
+    prepareUI()
+
+})
+
+</script>
+<div id="main">
+    <nav id="fractie"></nav>
+    <nav id="stadsdeel"><select size="14"></select></nav>
+    <nav id="gebied"><select size="14"></select></nav>
+    <nav id="buurt"><select size="14"></select></nav>
+    <nav id="dag"><select size="14"></select></nav>
+    <nav id="route">
+        <select size="14">
+            <option value="" selected>[ alle ]</option>
+            <option value="-">[ niet ingezameld ]</option>
+            <option value="OR Zuid 1 ma">OR Zuid 1 ma</option>
+            <option value="OR Zuid 1 di">OR Zuid 1 di</option>
+            <option value="OR Zuid 2 ma">OR Zuid 2 ma</option>
+            <option value="OR Zuid 2 wo">OR Zuid 2 wo</option>
+        </select>
+    </nav>
+    <nav id="adres"><select size="14" multiple></select></nav>
+    <div id="actie">
+        <div id="controls">
+            <button id="add-route">Nieuwe route</button>
+            <button id="copy-route">Kopieer naar andere dag</button>
+            <button id="edit-route">Bewerk route</button>
+        </div>
+    </div>
+    <main id="kaart">
+        <div id="map"></div>
+    </main>
+</div>
+</html>
