@@ -8,6 +8,12 @@ DEFAULT_HEADERS = {
 
 
 def make_session(headers: Optional[dict[str, str]] = None) -> Session:
+    """Maakt een sessie object.
+
+    :param headers: De headers die worden meegestuurd in elk request.
+        Standaard is dit `sessie.DEFAULT_HEADERS`.
+    :return: Een Python requests Session object.
+    """
     session = Session()
     session.headers.update(headers or DEFAULT_HEADERS)
     return session
