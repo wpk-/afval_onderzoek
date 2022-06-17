@@ -14,8 +14,9 @@ over de graaf. Standaard wordt de Euclidische afstand gebruikt maar het is ook
 mogelijk om zelf de afstanden te berekenen en mee te geven.
 
 [osm.py](afval/osm.py) Interface naar Open Street Maps. Raadpleeg OSM data via
-de Overpass API. Voorgedefinieerde queries bestaan voor wandelpaden maar elke
-query is mogelijk.
+de Overpass API. Voorgedefinieerde queries bestaan voor wandelwegen maar elke
+query is mogelijk. De wandelwegen kunnen eenvoudig worden opgehaald als een
+`Graaf`.
 
 [projectie.py](afval/projectie.py) Functies om te projecteren tussen
 verschillende coordinaatsystemen. Bijvoorbeeld van GPS (EPSG 4326) naar
