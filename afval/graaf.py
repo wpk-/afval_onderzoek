@@ -1,3 +1,4 @@
+import logging
 from heapq import heapify, heappop, heappush
 from typing import TypeVar
 
@@ -5,6 +6,8 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from afval.types import AfstandIndex
+
+logger = logging.getLogger('__name__')
 
 
 class Graaf:
@@ -75,7 +78,7 @@ G = TypeVar('G', Graaf, KDGraaf)
 def dichtstbijzijnde_doel(graaf: G, doelen: np.ndarray,
                           lijn_lengtes: np.ndarray | None = None,
                           doel_tot_graaf: AfstandIndex | None = None,
-                          ) -> AfstandIndex:
+                          ) -> tuple[np.ndarray, np.ndarray]:
     """Berekent voor elk punt in de graaf het dichtstbijzijnde doel.
 
     De doelen kunnen buiten de graaf liggen.
@@ -159,7 +162,42 @@ def dichtstbijzijnde_doel(graaf: G, doelen: np.ndarray,
         for l, vj in a[vi]:
             heappush(front, (zi + l, vj, ri))
 
-    return z, r
+    return AfstandIndex((z, r))
+
+
+def herverdeel_hemelsbreed(doel_afstand: AfstandIndex,
+                           bronnen: np.ndarray,
+                           doelen: np.ndarray,
+                           max_onderling: float
+                           ) -> tuple[np.ndarray, np.ndarray]:
+    """Kent hemelsbreed toe voor bronnen die erg dicht bij elkaar liggen.
+
+    :param doel_afstand: Afstand van elke bron tot het dichtstbijzijnde
+        doel, gemeten over de graaf.
+    :param bronnen: Numpy p x 2 array van bron coördinaten. Deze mogen
+        buiten de graaf liggen.
+    :param doelen: Numpy k x 2 array van doel coördinaten. Deze mogen
+        buiten de graaf liggen.
+    :param max_onderling: Tussen doelen met een onderlinge afstand
+        kleiner of gelijk aan max_onderling worden de bronnen herverdeeld
+        op basis van Euclidische afstand.
+    :return: Kopie van doel_afstand met een (gedeeltelijke) herberekende
+        toekenning van bronnen aan doelen.
+    """
+    bronnen = np.atleast_2d(bronnen)
+    doelen = np.atleast_2d(doelen)
+
+    afstand, index = doel_afstand
+    afstand = np.copy(afstand)
+    index = np.copy(index)
+
+    for i, j in KDTree(doelen).query_pairs(r=max_onderling):
+        m = (index == i) | (index == j)
+        d, ix = KDTree(doelen[(i, j), :]).query(bronnen[m])
+        index[m] = np.array([i, j])[ix]
+        afstand[m] = d
+
+    return afstand, index
 
 
 def knip(graaf: G, max_lengte: float) -> tuple[G, np.ndarray]:
@@ -221,9 +259,10 @@ def knip(graaf: G, max_lengte: float) -> tuple[G, np.ndarray]:
 def kortste_afstand(graaf: G, bronnen: np.ndarray,
                     doelen: AfstandIndex | np.ndarray,
                     lijn_lengtes: np.ndarray | None = None,
+                    correctie_op_afstand: float = None,
                     bron_tot_graaf: AfstandIndex | None = None,
                     doel_tot_graaf: AfstandIndex | None = None,
-                    ) -> AfstandIndex:
+                    ) -> tuple[np.ndarray, np.ndarray]:
     """Vindt voor elke bron het dichtstbijzijnde doel over de graaf.
 
     Zie ook uitleg in de documentatie van `dichtstbijzijnde_doel()`.
@@ -243,6 +282,10 @@ def kortste_afstand(graaf: G, bronnen: np.ndarray,
     :param lijn_lengtes: Numpy array met m vooraf uitgerekende
         lijnlengtes. Dit is een optioneel argument. Standaard worden de
         lengtes van de lijnen in de graaf uitgerekend.
+    :param correctie_op_afstand: Wanneer twee doelen dichter bij elkaar
+        liggen dan deze afstand worden de bronnen tussen deze twee doelen
+        herverdeeld op basis van hemelsbrede (Euclidische) afstand.
+        Standaard wordt dit niet gedaan.
     :param bron_tot_graaf: Dit is een AfstandIndex tuple met
         array-lengtes p. De eerste array geeft per bron de kortste
         afstand tot de graaf. De tweede array geeft per bron de index van
@@ -260,9 +303,12 @@ def kortste_afstand(graaf: G, bronnen: np.ndarray,
     """
     try:
         afstand, index = doelen
-    except TypeError:
+    except ValueError:
         afstand, index = dichtstbijzijnde_doel(graaf, doelen, lijn_lengtes,
                                                doel_tot_graaf)
+    else:
+        if correctie_op_afstand:
+            raise ValueError('Werkelijke doel (x, y) nodig voor correctie.')
 
     bronnen = np.atleast_2d(bronnen)
 
@@ -275,4 +321,11 @@ def kortste_afstand(graaf: G, bronnen: np.ndarray,
             graaf = KDGraaf.van_graaf(graaf)
             d, ix = graaf.kd.query(bronnen)
 
-    return d + afstand[ix], index[ix]
+    van_naar = d + afstand[ix], index[ix]
+
+    if correctie_op_afstand:
+        logger.debug('Correctie voor dicht bij elkaar liggende doelen...')
+        van_naar = herverdeel_hemelsbreed(van_naar, bronnen, doelen,
+                                          max_onderling=correctie_op_afstand)
+
+    return van_naar

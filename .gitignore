@@ -1,4 +1,6 @@
 demo/cache/
+demo/in/
+demo/out/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

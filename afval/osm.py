@@ -14,14 +14,17 @@ import numpy as np
 from orjson import orjson
 from requests import HTTPError, Session
 
-from afval.graaf import Graaf
+from afval.graaf import Graaf, knip
+from afval.projectie import projecteer_epsg, rijksdriehoek
 from afval.session import make_session
 from afval.types import JSON
 
 logger = logging.getLogger(__name__)
 
+bbox_amsterdam_gps = (52.2777, 4.7280, 52.4314, 5.1075)
 
-def json(query: str, timeout: int = 10, session: Session = None) -> JSON:
+
+def json(query: str, timeout: int = None, session: Session = None) -> JSON:
     """Downloadt de JSON-response van de Overpass OSM API.
 
     :param query: De Overpass query.
@@ -36,7 +39,6 @@ def json(query: str, timeout: int = 10, session: Session = None) -> JSON:
     :return: De JSON-respons van de Overpass server.
     """
     session = session or make_session()
-    timeout = timeout or 10
 
     url = 'https://www.overpass-api.de/api/interpreter'
     data = {'data': query}
@@ -134,15 +136,23 @@ def wandelwegen(bbox: tuple[float, float, float, float], timeout: int,
         (lat_min, long_min, lat_max, long_max).
     :param timeout: Maximale (reken-/request-)tijd voor het verzoek.
     :param args: Optionele extra argumenten voor graaf().
-    :param kwargs: Optionele extra keyword argumenten voor graaf().
+    :param kwargs: Optionele extra keyword argumenten voor
+        wandelwegen_query() en graaf(). Zie beide functies voor
+        documentatie.
     :return: Een graaf van alle wandelwegen in het gemarkeerde gebied.
     """
-    query = wandelwegen_query(bbox, timeout)
-    return graaf(query, timeout, *args, **kwargs)
+    query_kwargs = {
+        k: kwargs.pop(k)
+        for k in ('fietspaden', 'voetpaden', 'voetgangers', 'trappen')
+        if k in kwargs
+    }
+    query = wandelwegen_query(bbox, timeout, **query_kwargs)
+    return graaf(query, *args, **kwargs)
 
 
-def wandelwegen_query(bbox: tuple[float, float, float, float], timeout: int
-                      ) -> str:
+def wandelwegen_query(bbox: tuple[float, float, float, float], timeout: int,
+                      fietspaden: bool = False, voetpaden: bool = False,
+                      voetgangers: bool = False, trappen: bool = False) -> str:
     """Bouwt de Overpass query voor wandelwegen in het gebied.
 
     :param bbox: Rechthoek die het gebied markeert, als volgt:
@@ -151,14 +161,46 @@ def wandelwegen_query(bbox: tuple[float, float, float, float], timeout: int
         de waarde, hoe lager de prioriteit. Maar bij een te lage waarde,
         als de benodigde rekentijd de timeout overschrijdt, zal de query
         falen.
-    :return:
+    :param fietspaden: De graaf bevat ook fietspaden. Standaard is False.
+    :param voetpaden: De graaf bevat ook voetpaden. Standaard is False.
+    :param voetgangers: De graaf bevat ook voetgangers wegdelen.
+        Standaard is False.
+    :param trappen: De graaf bevat ook trappen. Standaard is False.
+    :return: Een graaf van alle wegdelen in het geselecteerde gebied.
     """
     base_query = (
         'way["highway"]'
-        '["highway"!~"motor|proposed|abandoned|platform|raceway"]'
-        '["foot"!~"no"]'
-        '["pedestrians"!~"no"]'
+        '["highway"!~"motor|railway|busway|platform|service'
+        f'{"" if fietspaden else "|cycleway"}{"" if voetpaden else "|footway"}'
+        f'{"" if voetgangers else "|pedestrian"}{"" if trappen else "|steps"}"'
+        ']'
     )
     return (f'[out:json][timeout:{timeout}];'
             f'{base_query}{bbox};(._;>;);'
             f'out skel;')
+
+
+def amsterdam(knip_lengte: float = None, **wegen) -> tuple[Graaf, np.ndarray]:
+    """Downloadt de basiskaart van Amsterdam.
+
+    :param knip_lengte: De maximale lengte van een lijn in de graaf. Deze
+        parameter is optioneel. Alleen als een maximale lengte wordt
+        opgegeven worden langere lijnen opgedeeld.
+    :param wegen: Optionele extra argumenten voor welke wegen opgevraagd
+        worden. Zie de documentatie van wandelwegen_query() voor uitleg.
+    :return: Twee waardes: Een graaf met de wegen van Amsterdam en een
+        numpy array met de lengtes van alle lijnen in de graaf.
+    """
+    timeout = 15
+
+    logging.debug('Download wegen van OSM...')
+    kaart = wandelwegen(bbox_amsterdam_gps, timeout=timeout, **wegen)
+    kaart = Graaf(projecteer_epsg(kaart.punten, rijksdriehoek), kaart.lijnen)
+    logger.debug(f'{kaart.aantal_punten} punten, '
+                 f'{kaart.aantal_lijnen} lijnen.')
+
+    if knip_lengte:
+        logger.debug('Prepareer voor berekeningen...')
+        return knip(kaart, max_lengte=knip_lengte)
+    else:
+        return kaart, kaart.lijn_lengtes()

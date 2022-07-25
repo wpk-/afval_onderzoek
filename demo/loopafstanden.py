@@ -5,19 +5,21 @@ from collections.abc import Sequence
 import numpy as np
 import plotly.graph_objects as go
 from aapi.csv import ContainersCsv, VerblijfsobjectenCsv
+from diskcache import Cache
+from scipy.spatial import KDTree
 
 from afval.graaf import (
-    Graaf, KDGraaf, knip, dichtstbijzijnde_doel, kortste_afstand)
-from afval.osm import wandelwegen
+    Graaf, KDGraaf, knip, dichtstbijzijnde_doel, kortste_afstand,
+    herverdeel_hemelsbreed, kortste_afstand)
+from afval.osm import wandelwegen, amsterdam
 from afval.projectie import projecteer_epsg
 from afval.types import AfstandIndex
 
 containers = ContainersCsv(
-    'cache/Containers papier 2022-05-23.csv',
+    'cache/Containers rest 2022-01-10.csv',
     {
-        'fractieOmschrijving': 'Papier',
+        'fractieOmschrijving': 'Rest',
         'status': 1,
-        'verwijderdDp': False,
         'geometrie[isnull]': False,
     }
 )
@@ -31,6 +33,13 @@ huishoudens = VerblijfsobjectenCsv(
 )
 
 bbox_amsterdam = (52.2880962, 4.7543934, 52.4252595, 5.0212665)
+
+cache = Cache('cache/')
+
+
+@cache.memoize(name='cached_amsterdam', expire=60*60*24*1000)
+def cached_amsterdam(*args, **kwargs) -> tuple[Graaf, np.ndarray]:
+    return amsterdam(*args, **kwargs)
 
 
 def plot_graph(g: Graaf, fig: go.Figure | None = None) -> go.Figure:
@@ -97,6 +106,48 @@ def argsort_rows(a: np.ndarray) -> np.ndarray:
     return np.argsort(b.ravel())
 
 
+def kortst():
+    knip = 3.
+    dubbel_cluster = 25.
+
+    print('Lees clusters...')
+    clusters = defaultdict(list)
+    for c in containers:
+        clusters[c.clusterId].append(c.geometrie)
+    targets_xy = np.vstack([np.mean(cc, axis=0) for cc in clusters.values()])
+
+    print('Lees huishoudens...')
+    sources_xy = np.array([h.geometrie for h in huishoudens])
+
+    afstand = np.inf * np.ones(len(clusters), dtype=float)
+    index = np.zeros(len(clusters), dtype=int)
+
+    for i, (fietspaden, voetpaden) in enumerate((
+            (False, False), (False, True), (True, False), (True, True))):
+        print('Lees de kaart van Amsterdam...')
+        kaart, lijn_lengtes = cached_amsterdam(
+            knip_lengte=knip, fietspaden=fietspaden, voetpaden=voetpaden)
+
+        print('Bereken loopafstanden...')
+        d, ix = kortste_afstand(kaart, sources_xy, targets_xy,
+                                lijn_lengtes=lijn_lengtes,
+                                correctie_op_afstand=dubbel_cluster)
+
+        if i == 0:
+            afstand = d
+            index = ix
+        else:
+            ii = d < afstand
+            afstand[ii] = d[ii]
+            index[ii] = ix[ii]
+            print(ii.sum(), 'afstanden verkort.')
+
+    print('Plot...')
+    kaart0, _ = cached_amsterdam(fietspaden=True, voetpaden=True)
+    fig = plot_distances(kaart0, sources_xy, targets_xy, (afstand, index))
+    fig.show()
+
+
 def main():
     from time import time
 
@@ -105,8 +156,10 @@ def main():
     # bbox = (lat_min, lng_max, lat_max, lng_min)
     # bbox = (52.3470533, 4.9962480, 52.3533863, 5.0081570)   # IJburg
     # bbox = (52.3432026, 4.9763181, 52.3613222, 5.0201921)   # IJburg redone
+    # bbox = (52.3625584, 4.9303917, 52.3642942, 4.9339828)   # Javastraat 9
+    # bbox = (52.3589340, 4.8612879, 52.3617979, 4.8704289)   # Overtoom
     t0 = time()
-    # kaart = wandelwegen(bbox, timeout=5)
+    # kaart = wandelwegen(bbox, timeout=10)
     kaart = wandelwegen(bbox_amsterdam, timeout=10)
     kaart0 = kaart = Graaf(projecteer_epsg(kaart.punten, 28992), kaart.lijnen)
     print(f'Kaart gelezen, {time() - t0:.2f} sec.'
@@ -168,6 +221,11 @@ def main():
     print(f'{source_target[0].size} huishouden-loopafstanden'
           f' in {time() - t0:.2f} sec.')
 
+    # Voor dicht bij elkaar gelegen clusters (max afstand 25 meter),
+    # herverdeel de huishoudens op hemelsbrede afstand.
+    source_target = herverdeel_hemelsbreed(source_target, sources_xy,
+                                           targets_xy, max_onderling=25)
+
     print(f'Kortste afstand tot een container: {source_target[0].min()}')
     print(f'Langste afstand tot een container: {source_target[0].max()}')
     # ix_source = np.argmax(source_target.distance)
@@ -185,4 +243,5 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     # logging.getLogger('requests').setLevel(logging.WARNING)
     # logging.getLogger('urllib3').setLevel(logging.WARNING)
-    main()
+    # main()
+    kortst()
